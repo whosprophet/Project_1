@@ -1,0 +1,383 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+
+setwd("C:/Users/Kang/Desktop/7013forcasting/project/data")
+rm(list=ls())
+
+```
+
+
+```{r}
+
+library(pacman)
+
+p_load(fpp3,TSA)
+
+```
+
+```{r}
+# loading data
+durable_goods_ <- read.csv("Durable_Neworder.csv")
+
+Hr_Worked_Monthly <- read.csv("Weekly_Hours_Worked.csv")
+
+
+M2_Real <- read.csv("M2REAL.csv")
+
+Inventory_to_Sales <- read.csv("Inventory_to_Sales.csv")
+
+PPI_ <- read.csv("PPIACO.csv")
+
+
+```
+
+
+```{r}
+# Varible of Interest; Change to tsibble
+durable_goods <- durable_goods_ %>% 
+  rename(Purchase = UMDMNO) %>% 
+  mutate(Date = yearmonth(DATE)) %>% 
+  select(-DATE) %>% 
+  as_tsibble(
+    index = Date)
+```
+
+```{r}
+# change inventory_to_sale to tsibble, lagging one period to durable_goods
+
+Inv_to_Sale <- Inventory_to_Sales %>% 
+  rename(ratio = MNFCTRIRNSA) %>% 
+  mutate(Date = yearmonth(DATE)+1) %>% 
+  select(-DATE) %>% 
+  as_tsibble(
+    index = Date) %>% 
+  filter(Date > yearmonth("1992-01-01")) %>% 
+  filter(Date < yearmonth("2021-02-01"))
+
+# explore varibles
+
+Inv_to_Sale %>% autoplot()
+# parabola shaped, appear to cover macroeconomic trend
+
+Inv_to_Sale %>% ACF() %>% autoplot()
+
+
+```
+
+```{r}
+# Change Hr_worked to tsibble, matching period
+
+Hr_worked <- Hr_Worked_Monthly %>% 
+  rename(Work_Hour = HOHWMN02USM065S) %>% 
+  mutate(Date = yearmonth(DATE)+1) %>% 
+  select(-DATE) %>% 
+  as_tsibble(
+    index = Date) %>% 
+  filter(Date > yearmonth("1992-01-01")) %>% 
+  filter(Date < yearmonth("2021-02-01"))
+
+# explore variables
+
+Hr_worked %>% autoplot()
+
+Hr_worked %>% ACF() %>% autoplot()
+
+Hr_worked %>% gg_tsdisplay(Work_Hour, plot_type = "partial")
+
+Hr_worked %>% mutate(diff = difference(Work_Hour))  %>% gg_tsdisplay(diff,plot_type = "partial")
+
+
+```
+
+
+```{r}
+# Change M2real to tsibble, matching period
+
+M2 <- M2_Real %>% 
+  rename(M2_Q = M2REAL) %>% 
+  mutate(Date = yearmonth(DATE)+1) %>% 
+  select(-DATE) %>% 
+  as_tsibble(
+    index = Date) %>% 
+  filter(Date > yearmonth("1992-01-01")) %>% 
+  filter(Date < yearmonth("2021-02-01"))
+
+# explore variable 
+# no seasonality exists
+M2 %>% ACF() %>% autoplot()
+
+M2 %>% gg_tsdisplay(M2_Q %>% difference(),plot_type = "partial")
+
+```
+
+```{r}
+PPI <- PPI_ %>% 
+  rename(Ppi = PPIACO) %>% 
+  mutate(Date = yearmonth(DATE)+1) %>% 
+  select(-DATE) %>% 
+  as_tsibble(
+    index = Date) %>% 
+  filter(Date > yearmonth("1992-01-01")) %>% 
+  filter(Date < yearmonth("2021-02-01"))
+
+```
+
+
+
+
+
+
+```{r, warning= FALSE}
+# combine series for easier processing
+
+durable_goods <- durable_goods %>% 
+  left_join(Inv_to_Sale) %>% 
+  left_join(Hr_worked) %>% 
+  left_join(M2) %>% 
+  left_join(PPI) %>% 
+  mutate(Purchase = c(NA,NA,NA,Purchase[4:348]))
+
+train <- durable_goods %>% 
+  filter(Date<yearmonth('2020-02-01'))
+
+test <- durable_goods %>% 
+  filter(Date>yearmonth('2020-01-01'))
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Explore Scatter plot
+
+par(mfrow=c(2,2))
+plot(Inv_to_Sale$ratio,durable_goods$Purchase)
+plot(M2$M2_Q,durable_goods$Purchase)
+plot(PPI$Ppi,durable_goods$Purchase)
+plot(Hr_worked$Work_Hour,durable_goods$Purchase)
+
+```
+
+
+
+```{r}
+# finalized
+# try with inv_to_sales 
+
+fit_inv <- train %>% 
+  model( no_lag = TSLM(Purchase ~ ratio),
+         lag_1 =  TSLM(Purchase ~ ratio + lag(ratio)),
+         lag_2=   TSLM(Purchase ~ ratio + lag(ratio) + lag(ratio,2))
+         )
+
+report(fit_inv %>% select(no_lag))
+# significant variable
+
+report(fit_inv %>% select(lag_1))
+report(fit_inv %>% select(lag_2))
+# insignificant
+
+residuals(fit_inv %>% select(no_lag)) %>% 
+  gg_tsdisplay(.resid %>% difference(), plot_type = "partial") +
+  ggtitle("regression error before arima")
+
+## residual after difference, looks like ar(2)
+ 
+
+
+fit_inv_arima <- train %>% 
+  model(arima_1 = ARIMA(Purchase ~ ratio, approximation = FALSE,stepwise = FALSE))
+
+glance(fit_inv_arima)
+
+
+report(fit_inv_arima)
+
+coefficients(fit_inv_arima)
+## AICc = 6794
+## ARIMA(2,1,3)(0,1,1)
+
+fit_inv_arima %>% forecast(new_data = test) %>% autoplot(level = NULL) +autolayer(test)
+
+```
+
+
+
+```{r}
+#finalized
+# try with M2
+
+
+fit_m2 <- train %>% 
+  model( first = TSLM(Purchase ~ M2_Q),
+        lag1 = TSLM(Purchase ~ M2_Q+lag(M2_Q)),
+        lag2 = TSLM(Purchase ~ lag(M2_Q,2)),
+        lag3 = TSLM(Purchase ~ lag(M2_Q,3))
+       
+        )
+    
+glance(fit_m2)
+# Adding lag doesnt improve
+
+report(fit_m2 %>% select(lag1))
+# Lag is not significant
+# probably due to high collerity btwn lag and x
+
+fit_m2_arima <- train %>% 
+  model(arima_1 = ARIMA(Purchase ~ M2_Q + I(M2_Q^2), approximation = FALSE,stepwise = FALSE))
+
+glance(fit_m2_arima)
+
+
+report(fit_m2_arima)
+## AICc = 6783
+##pdq(4,0,1)(0,1,1)
+
+coefficients(fit_m2_arima)
+
+
+fit_m2_arima %>% forecast(new_data = test) %>% autoplot(level = NULL)+ autolayer(test)
+
+accuracy(fit_m2_arima %>% forecast(new_data = test),test)
+
+```
+
+```{r}
+#finalized
+# try with PPI
+
+fit_ppi <- train %>% 
+  model( first = TSLM(Purchase ~ Ppi),
+        lag1 = TSLM(Purchase ~ Ppi+lag(Ppi)),
+        lag2 = TSLM(Purchase ~ lag(Ppi,2)),
+        lag3 = TSLM(Purchase ~ lag(Ppi,3))
+       
+        )
+    
+glance(fit_ppi)
+# Adding lag doesnt improve
+
+report(fit_ppi %>% select(lag1))
+# Lag is not significant
+
+fit_ppi_arima <- train %>% 
+  model(arima_1 = ARIMA(Purchase ~ Ppi, approximation = FALSE,stepwise = FALSE))
+
+glance(fit_ppi_arima)
+
+
+report(fit_ppi_arima)
+## AICc = 7223
+## ARIMA(4,0,0)(2,0,0)
+coefficients(fit_ppi_arima)
+
+
+fit_ppi_arima %>% forecast(new_data = test) %>% autoplot(level = NULL)+ autolayer(test)
+
+accuracy(fit_ppi_arima %>% forecast(new_data = test),test)
+
+```
+
+
+
+```{r}
+#finalized
+# try with Hr_worked
+
+fit_hr <- train %>% 
+  model( no_lag = TSLM(Purchase ~ Work_Hour),
+         lag_1 =  TSLM(Purchase ~ Work_Hour + lag(Work_Hour)),
+         lag_2=   TSLM(Purchase ~ Work_Hour + lag(Work_Hour) + lag(Work_Hour,2))
+         )
+
+report(fit_hr %>% select(no_lag))
+# significant variable
+
+
+report(fit_hr %>% select(lag_2))
+# insignificant
+
+######
+######
+######
+fit_hr_arima <- train %>% 
+  model(arima_1 = ARIMA(Purchase ~ Work_Hour , approximation = FALSE,stepwise = FALSE))
+##### 
+#####
+##### AICc = 7128
+
+
+report(fit_hr_arima)
+
+
+```
+
+
+
+
+
+
+```{r}
+# fit multiple predictors
+
+fit_multiple <- train %>% model(
+  ratio_workhr = ARIMA(Purchase ~ratio + Work_Hour, stepwise = FALSE, approximation = FALSE),
+  ratio_m2 = ARIMA(Purchasae ~ratio + M2_Q, stepwise = FALSE, approximation = FALSE),
+  ratio_ppi = ARIMA(Purchase ~ratio + Ppi, stepwise = FALSE, approximation = FALSE),
+  m2_ppi = ARIMA(Purchase ~M2_Q + Ppi, stepwise = FALSE, approximation = FALSE),
+  m2_workhr = ARIMA(Purchase ~M2_Q + Work_Hour, stepwise = FALSE, approximation = FALSE),
+  ppi_workhr = ARIMA(Purchase ~Ppi + Work_Hour, stepwise = FALSE, approximation = FALSE),
+  ratio_m2_ppi = ARIMA(Purchase ~M2_Q + Ppi +ratio, stepwise = FALSE, approximation = FALSE),
+  ratio_m2_workhr = ARIMA(Purchase ~ratio + M2_Q + Work_Hour, stepwise = FALSE, approximation = FALSE),
+  m2_workhr_ppi = ARIMA(Purchase ~M2_Q + Work_Hour+ Ppi, stepwise = FALSE, approximation = FALSE),
+  all = ARIMA(Purchase ~M2_Q + Ppi + ratio + Work_Hour, stepwise = FALSE, approximation = FALSE)
+  
+  )
+
+
+glance(fit_multiple)
+
+```
+
+```{r}
+# based on aicc, best we have is workhr_ppi
+
+m2_work_ppi <- fit_multiple %>% select(m2_workhr_ppi)
+
+accuracy(fit_multiple %>% forecast(new_data = test),test) #%>% autoplot(level = NULL)+ autolayer(test),test)
+
+fit_multiple %>% select(ratio_workhr) %>% forecast(new_data = test) %>% autoplot(level = NULL)+ autolayer(test)
+
+fit_multiple %>% select (ppi_workhr) %>% forecast(new_data = test) %>% autoplot(level = NULL) +autolayer(test)
+
+
+# ppi_workhr and ratio_workhr are among the best in testing MAPE, and ppi_workhr is among the best in training AICc,
+
+gg_tsresiduals(fit_multiple %>% select(ppi_workhr)) 
+
+#residual seems ok, only one lag acf is out among 25 of them and histogram looks normal.
+
+
+# therefore we choose ppi_workhr as the final model in dynamic regression.
+```
+
+
+
+
+
+

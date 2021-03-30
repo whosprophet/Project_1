@@ -1,0 +1,311 @@
+---
+title: "Durable_prophet"
+author: "XU Zijin"
+date: "20/03/2021"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+    keep_tex: yes
+    latex_engine: xelatex
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: cosmo
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/HKU/Module 4/7013 Forecasting and Predictive Analytics/Project/data")
+knitr::opts_chunk$set(results =  TRUE)
+```
+
+```{r, include=FALSE}
+library(tinytex)
+library(dygraphs)
+library(fpp3)
+library(fable.prophet)
+```
+\pagebreak
+
+# Prophet Model
+
+## Read durable new order data.
+
+```{r}
+Durable_Neworder <- read.csv("Durable_Neworder.csv")
+Durable_Neworder <- Durable_Neworder %>% 
+  mutate(Month = yearmonth(DATE)) %>% 
+  as_tsibble(index = Month) %>%
+  select(Month, UMDMNO) %>%
+  `colnames<-`(c("Month","Order"))
+
+# time plot 
+Durable_Neworder %>% gg_tsdisplay(Order, plot_type = "partial")
+```
+
+Split training set and test set.
+```{r}
+durable.train <- Durable_Neworder %>%
+  filter(Month <= yearmonth("2020-01-01"))
+nrow(Durable_Neworder); nrow(durable.train)
+```
+
+
+## Try time series forecasting.
+
+```{r}
+fit.ts.1 <- durable.train %>%
+  model(prophet_1 = prophet(Order ~ 
+                              growth(changepoint_prior_scale = 0.5)+
+                              season(period = 12, 
+                                     order = 6,
+                                     type = "multiplicative",
+                                     prior_scale = 10)
+  ))
+fc.ts.1 <- fit.ts.1 %>% forecast(h = 12)
+accuracy(fit.ts.1) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+accuracy(fc.ts.1, Durable_Neworder) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+```
+
+
+With log transformation.
+```{r}
+fit.ts.log1 <- durable.train %>%
+  model(prophet_1 = prophet(log(Order) ~ 
+                              growth(changepoint_prior_scale = 0.5)+
+                              season(period = 12, 
+                                     order = 6,
+                                     type = "multiplicative",
+                                     prior_scale = 10)
+  ))
+fc.ts.log1 <- fit.ts.log1 %>% forecast(h = 12)
+accuracy(fit.ts.log1) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+accuracy(fc.ts.log1, Durable_Neworder) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+```
+
+```{r}
+augment(fit.ts.1) %>% autoplot(Order, color="gray") +
+  autolayer(augment(fit.ts.1),.fitted, color="red")
+fc.ts.1 %>% autoplot(Durable_Neworder%>%
+                       filter(Month>=yearmonth("2015-01-01")))
+```
+
+
+
+
+### Tune parameters.
+```{r}
+# construct parameter combination dataframe
+changepoint_scale <- seq(0.1,0.5, 0.1)
+season_scale <- c(0.1,seq(2, 10, 2))
+fourier.K <- 1:(12/2)
+season.type <- c("multiplicative","additive")
+para_df <- expand.grid(g_n = changepoint_scale, 
+                       s_n = season_scale, 
+                       K = fourier.K,
+                       s.type = season.type,
+                       stringsAsFactors = F)
+nrow(para_df)
+```
+
+```{r}
+record_df <- data.frame(Model = NA, 
+                        train_MAPE = NA, 
+                        test_MAPE = NA)
+for (i in seq(1,nrow(para_df))){
+  fit <- durable.train %>%
+    model(prophet(Order ~ 
+                    growth(changepoint_prior_scale = para_df[i,1])+
+                    season(period = 12, 
+                           order = para_df[i,3],
+                           type = para_df[i,4],
+                           prior_scale = para_df[i,2])
+    ))
+  fc <- fit %>% forecast(h = 12)
+  record_df[i,1] <- i
+  record_df[i,2] <- accuracy(fit) %>% select(MAPE)
+  record_df[i,3] <- accuracy(fc, Durable_Neworder) %>% select(MAPE)
+  if (i %% 10 ==0){
+    print(i)
+  }
+}
+```
+```{r}
+model_df <- as.data.frame(cbind(record_df,para_df))
+head(model_df)
+```
+
+Look at the boxplots to select the parameters. 
+```{r, fig.height=6, fig.width=6}
+grobs <- list()
+model_df %>% ggplot(aes(x = factor(s_n), y = test_MAPE, fill = s.type))+
+  geom_boxplot() -> grobs[[1]]
+model_df %>% ggplot(aes(x = factor(K), y = test_MAPE, fill =  s.type))+
+  geom_boxplot() -> grobs[[2]]
+model_df %>% ggplot(aes(x = factor(g_n), y = test_MAPE, fill = s.type))+
+  geom_boxplot() -> grobs[[3]]
+gridExtra::grid.arrange(grobs=grobs,ncol=1)
+```
+
+### Choose the parameter combination
+
+* prior_scale = 4
+* seasonal type = "additive"
+* fourier term = 6
+* changepoint_prior_scale = 0.5
+
+```{r}
+fit.ts <- durable.train %>%
+  model(prophet_ts = prophet(Order ~ 
+                               growth(changepoint_prior_scale = 0.5)+
+                               season(period = 12, 
+                                      order = 6,
+                                      type = "additive",
+                                      prior_scale = 4)),
+        prophet_log_ts = prophet(log(Order) ~ 
+                               growth(changepoint_prior_scale = 0.5)+
+                               season(period = 12, 
+                                      order = 6,
+                                      type = "additive",
+                                      prior_scale = 4)
+        ))
+fc.ts <- fit.ts %>% forecast(h = 12)
+accuracy(fit.ts) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+accuracy(fc.ts, Durable_Neworder) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+```
+```{r}
+fit.ts %>%select(prophet_ts) %>%gg_tsresiduals()
+fit.ts %>%select(prophet_log_ts) %>%gg_tsresiduals()
+```
+
+Use raw data without transformation.
+
+## Add predictors.
+Predictors are one month earlier.
+```{r}
+PPI <- read.csv("PPIACO.csv")
+PPI <- PPI %>% mutate(Month = yearmonth(DATE)) %>% 
+  as_tsibble(index = Month) %>%
+  select(Month, PPIACO) %>%
+  `colnames<-`(c("Month","PPI")) %>%
+  filter(Month >= yearmonth("1992-01-01") & 
+           Month < yearmonth("2021-01-01")) 
+
+WeeklyHour <- read.csv("Weekly_Hours_Worked.csv")
+WeeklyHour <- WeeklyHour %>% mutate(Month = yearmonth(DATE)) %>% 
+  as_tsibble(index = Month) %>%
+  select(Month, HOHWMN02USM065S) %>%
+  `colnames<-`(c("Month","Hour")) %>%
+  filter(Month >= yearmonth("1992-01-01") & 
+           Month < yearmonth("2021-01-01")) 
+
+InvSales <- read.csv("Inventory_to_Sales.csv")
+InvSales <- InvSales %>% mutate(Month = yearmonth(DATE)) %>% 
+  as_tsibble(index = Month) %>%
+  select(Month, MNFCTRIRNSA) %>%
+  `colnames<-`(c("Month","InvSalesRatio")) %>%
+  filter(Month >= yearmonth("1992-01-01") & 
+           Month < yearmonth("2021-01-01")) 
+
+Durable_Neworder <- Durable_Neworder %>% 
+  mutate(PPI = PPI$PPI,
+         WeeklyHour = WeeklyHour$Hour,
+         InvSalesRatio = InvSales$InvSalesRatio)
+
+durable.train <- Durable_Neworder %>%
+  filter(Month <= yearmonth("2020-01-01"))
+```
+
+Test set
+```{r}
+durable.test <- Durable_Neworder %>%
+  filter(Month >= yearmonth("2020-02-01"))
+
+durable.test <- new_data(durable.train, 12) %>%
+  mutate(
+    PPI = durable.test$PPI,
+    WeeklyHour = durable.test$WeeklyHour,
+    InvSalesRatio = durable.test$InvSalesRatio
+  )
+durable.test
+```
+
+```{r}
+fit.x <- durable.train %>%
+  model(prophet_ppi = prophet(Order ~ 
+                                PPI + 
+                                growth(changepoint_prior_scale = 0.5)+
+                                season(period = 12, 
+                                       order = 6,
+                                       type = "additive",
+                                       prior_scale = 4)),
+        prophet_wh = prophet(Order ~ 
+                               WeeklyHour +
+                               growth(changepoint_prior_scale = 0.5)+
+                               season(period = 12, 
+                                      order = 6,
+                                      type = "additive",
+                                      prior_scale = 4)),
+        prophet_inv = prophet(Order ~ 
+                                InvSalesRatio +
+                                growth(changepoint_prior_scale = 0.5)+
+                                season(period = 12, 
+                                       order = 6,
+                                       type = "additive",
+                                       prior_scale = 4)),
+        prophet_ppiwh = prophet(Order ~ 
+                                  PPI + WeeklyHour +
+                                  growth(changepoint_prior_scale = 0.5)+
+                                  season(period = 12, 
+                                         order = 6,
+                                         type = "additive",
+                                         prior_scale = 4)),
+        prophet_invwh = prophet(Order ~ 
+                                  InvSalesRatio + WeeklyHour + 
+                                  growth(changepoint_prior_scale = 0.5)+
+                                  season(period = 12, 
+                                         order = 6,
+                                         type = "additive",
+                                         prior_scale = 4)),
+        prophet_3 = prophet(Order ~ 
+                              InvSalesRatio + WeeklyHour + PPI+
+                              growth(changepoint_prior_scale = 0.5)+
+                              season(period = 12, 
+                                     order = 6,
+                                     type = "additive",
+                                     prior_scale = 4))
+  )
+```
+
+```{r}
+accuracy(fit.x) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+```
+
+```{r}
+fc.x <- fit.x %>% forecast(new_data = durable.test)
+accuracy(fc.x, Durable_Neworder) %>% 
+  select(.model, .type, RMSE, MAPE, MASE)
+```
+
+```{r}
+augment(fit.x) %>% autoplot(Order, color="gray") +
+  autolayer(augment(fit.x),.fitted, color="red")
+fc.x %>% autoplot(Durable_Neworder%>%
+                    filter(Month>=yearmonth("2018-01-01")),
+                  level = NULL)
+```
+```{r}
+fit.x %>% select(prophet_ppiwh) %>% gg_tsresiduals()
+```
+
+

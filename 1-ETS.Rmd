@@ -1,0 +1,300 @@
+---
+title: "Untitled"
+author: "Zhang Yaoyuan"
+date: "2021/3/14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(fpp3)
+```
+
+```{r}
+data_group<- read.csv('Durable_Neworder.csv')
+```
+
+###filter thed data
+```{r}
+data_group1 <- data_group %>%
+  mutate(month=yearmonth(DATE))%>%
+  select(-DATE)
+data_group1
+```
+```{r}
+data_group2 <- data_group1 %>%
+  as_tsibble(index=month)
+```
+```{r}
+data_group2 %>%
+  autoplot()
+```
+dcmp <- us_retail_employment %>%
+  model(classical_decomposition(Employed, type = "additive")) %>% 
+  components()
+
+###classical_decomposition
+```{r}
+dcmp <- data_group2 %>%
+  model(classical_decomposition(UMDMNO,type="multiplicative"))%>%
+  components()
+
+dcmp
+```
+
+###trend
+```{r}
+autoplot(data_group2, UMDMNO, color="gray")+
+  autolayer(dcmp, trend, color="red")
+```
+###components
+
+```{r}
+dcmp %>%
+  autoplot()
+```
+### the residuals are not that random, seasonal trend seems to be stable that is because that in this method, we assume seasonality remains unchanged
+```{r}
+autoplot(data_group2, UMDMNO, color="gray") +
+  autolayer(dcmp, season_adjust, color = "blue") 
+```
+### the seasonality seem to have light effect on the overall pattern, when we use seasonal adjusted data, the trend is not smooth
+
+### STL
+```{r}
+data_group2 %>%
+  model(STL(UMDMNO ~ trend(window = 7) + season(window = "periodic"),
+            robust = TRUE
+  )) %>%
+  components() ->dcmp1
+
+dcmp1 %>%
+  autoplot()
+```
+
+```{r}
+data_group2 %>%
+  model(STL(UMDMNO ~ trend(window = 9) + season(window = "periodic"),
+            robust = TRUE
+  )) %>%
+  components() ->dcmp2
+dcmp2 %>%
+  autoplot()
+```
+```{r}
+data_group2 %>%
+  model(STL(UMDMNO ~ trend(window = 10) + season(window = "periodic"),
+            robust = TRUE
+  )) %>%
+  components() ->dcmp3###set periodic
+dcmp3 %>%
+  autoplot()### white noise-residuals
+```
+### what happened on 2020.1?
+```{r}
+dcmp3 %>%
+  gg_subseries(season_year)
+```
+### the seasonality doesn not change because we set 'periodic'
+
+```{r}
+data_group2 %>%
+  model(STL(UMDMNO ~ trend(window = 13) + season(window = 8),
+            robust = TRUE
+  )) %>%
+  components() ->dcmp4
+dcmp4 %>%
+  autoplot()
+```
+### seasonality changes, it becomes stronger and stronger
+
+
+```{r}
+dcmp4 %>%
+  gg_subseries(season_year)
+```
+### ???我的妈呀这咋一点看不出来到底发生了啥
+
+
+```{r}
+data_group2 %>%
+  model(STL(UMDMNO ~ trend(window = 13) + season(window = 10),
+            robust = TRUE
+  )) %>%
+  components() ->dcmp5
+dcmp5 %>%
+  autoplot()
+
+```
+### using naive method to predict
+# naive
+
+
+```{r}
+data_group3 <- data_group2 %>%
+  filter(!is.na(UMDMNO)) 
+```
+
+```{r}
+fit1 <- data_group3%>%
+  model(NAIVE(UMDMNO))
+
+
+fit1%>%
+  forecast(h=12)%>%
+  autoplot()+
+  geom_point(aes(y=UMDMNO),data = data_group3,color="blue")
+```
+```{r}
+augment(fit1)
+```
+```{r}
+augment(fit1)%>%
+  ACF(.resid)%>%
+  autoplot()
+```
+### this is not white noise, not appropriate to do so
+```{r}
+SNAIVE_fit <- data_group3%>%
+  model(SNAIVE(~lag("year")))
+
+SNAIVE_fit %>%
+  forecast(h=12)%>%
+  autoplot()+
+  geom_point(aes(y=UMDMNO),data = data_group3,colour="blue")
+```
+```{r}
+augment(SNAIVE_fit)
+```
+```{r}
+augment(SNAIVE_fit)%>%
+  ACF(.resid)%>%
+  autoplot()
+```
+```{r}
+gg_tsresiduals(SNAIVE_fit)
+```
+
+aus_production %>%
+  filter(!is.na(Bricks)) %>%
+  model(RW(Bricks ~ drift())) %>%
+  forecast(h = "5 years") %>%
+  autoplot(aus_production, level = NULL) +
+  geom_line(aes(y=Bricks),data = slice(aus_production, range(cumsum(!is.na(Bricks)))),
+            linetype = "dashed", colour = "blue") +
+  ggtitle("Clay brick production in Australia")
+### drift
+```{r}
+data_group3%>%
+  model(RW(UMDMNO~drift()))%>%
+  forecast(h=12)%>%
+  autoplot(data_group3)+
+  geom_line(aes(y=UMDMNO),data = data_group3,colour="blue")
+```
+
+```{r}
+fit2 <- data_group3%>%
+  model(RW(UMDMNO~drift()))
+
+fit2 %>%
+  forecast(h=12)%>%
+  autoplot(data_group3)+
+  geom_line(aes(y=UMDMNO),data = data_group3,colour="blue")
+
+```
+```{r}
+gg_tsresiduals(fit2)
+```
+### from above plot we can see that, the residual trem is not white noise, so the drift method may not be capable of handling such a data and doing forecasts 
+
+```{r}
+```
+
+
+```{r}
+final_fit <-  data_group3 %>%
+  model(
+    Seasonal_naive = SNAIVE(UMDMNO),
+    Naive = NAIVE(UMDMNO),
+    Drift = RW(UMDMNO ~ drift()),
+    Mean = MEAN(UMDMNO))
+```
+
+###for all simple methods, lets check which one appears to give the best prediction
+```{r}
+fc <- final_fit %>%
+  forecast(h=12)
+```
+
+
+
+```{r}
+fc %>%
+  autoplot(data_group2,level=NULL)
+```
+
+```{r}
+accuracy(final_fit)
+```
+### the drift gives the best result
+
+### ETS
+```{r}
+ETS_fit <- data_group2 %>%
+  model(
+    addictive= ETS(UMDMNO ~ error("A")+trend("A")+season("A")),
+    multiplicative =ETS(UMDMNO ~ error("M")+trend("A")+season("M"))
+  )
+
+ETS_fc <- ETS_fit %>% forecast(h=12)
+
+ETS_fc %>%
+  autoplot(data_group2, level=NULL)
+```
+
+```{r}
+components(ETS_fit) %>% autoplot()
+```
+
+###是有什么assumption吗，multiplicative，为什么season和remainder直接是直线了
+```{r}
+train <- data_group2 %>%
+  filter(year(month) <= 2019)
+test <- data_group2 %>%
+  filter(year(month) >= 2020)
+```
+
+
+fit1 <- train %>%
+  model(
+    additive = ETS(Arrivals ~ error("M") + trend("A") + season("M")),
+    damped = ETS(Arrivals ~ error("M") + trend("Ad") + season("M"))
+  )
+
+fc <- fit1 %>%
+  forecast(h = 7)
+
+accuracy(fc, test)
+
+```{r}
+ETS_fit <- train %>%
+  model(
+    addictive= ETS(UMDMNO ~ error("A")+trend("A")+season("A")),
+    multiplicative =ETS(UMDMNO ~ error("M")+trend("A")+season("M"))
+  )
+
+ETS_fc <- ETS_fit %>% forecast(h=12)
+
+ETS_fc %>%
+  autoplot(data_group2, level=NULL)
+```
+
+```{r}
+accuracy(ETS_fc,test)
+```
+addictive seems to be a better choice
+
+
